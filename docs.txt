@@ -1,0 +1,15 @@
+We are working on a package for caching data. The main type in the package is called "SmartCache". Here's it's description:
+
+SmartCache:
+- Contains an in-memory cache of type "*T". The T type is generic.
+- Has a "primaryTTL" attribute
+    - It describes a time after which the cache should be refreshed, but data can still be returned from cache
+- Has a "secondaryTTL" attribute:
+    - It describes a time after which the cache should be refreshed, and cache can't be used to return data
+- Has a "cacheErrFunc" which is a function that given the error returns a ttl of the cache with error
+    - if the function returns ttl > 0, function error should be returned from the cache for that period of time
+- Has a "Get" method, that:
+    - Accepts a context
+    - Accepts a key
+    - Accepts a fetch function
+    - Returns data from cache or by calling the fetch function, depending on the cache state and timeouts
