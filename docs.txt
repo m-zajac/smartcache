@@ -12,4 +12,8 @@ SmartCache:
     - Accepts a context
     - Accepts a key
     - Accepts a fetch function
-    - Returns data from cache or by calling the fetch function, depending on the cache state and timeouts
+    - If there's no data in cache: calls fetch function, updates the cache and returns the result
+    - If there's data in cache and primaryTTL is not expired: returns the cached data
+    - If there's data in cache, primaryTTL is expired but secondaryTTL is not expired: returns the data from cache and does cache update in the background by calling fetch function
+    - If there's data in cache and all TTLs are expired: works as if there's no data in cache
+    - When called and a cache update for the same key is still running in the background, it should wait for the results in the cache
