@@ -9,6 +9,7 @@ import (
 
 	"github.com/m-zajac/smartcache"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCache(t *testing.T) {
@@ -33,7 +34,8 @@ func TestCache(t *testing.T) {
 	t.Run("missing key", func(t *testing.T) {
 		calls.Store(0)
 
-		cache := smartcache.New[string]()
+		cache, err := smartcache.New[string]()
+		require.NoError(t, err)
 
 		ctx := context.Background()
 
@@ -48,7 +50,8 @@ func TestCache(t *testing.T) {
 	t.Run("present key", func(t *testing.T) {
 		calls.Store(0)
 
-		cache := smartcache.New[string]()
+		cache, err := smartcache.New[string]()
+		require.NoError(t, err)
 
 		ctx := context.Background()
 
@@ -66,18 +69,20 @@ func TestCache(t *testing.T) {
 	// When Get function is called with a context that was already cancelled,
 	// it should return an error immediately.
 	t.Run("cancelled parent context", func(t *testing.T) {
-		cache := smartcache.New[string]()
+		cache, err := smartcache.New[string]()
+		require.NoError(t, err)
 
 		parentCtx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		_, err := cache.Get(parentCtx, key, fetchFunc)
+		_, err = cache.Get(parentCtx, key, fetchFunc)
 		assert.Error(t, err)
 	})
 
 	// When a Cache object is closed, all goroutines should be cleaned up.
 	t.Run("close", func(t *testing.T) {
-		cache := smartcache.New[string]()
+		cache, err := smartcache.New[string]()
+		require.NoError(t, err)
 
 		ready := make(chan struct{})
 
@@ -94,12 +99,13 @@ func TestCache(t *testing.T) {
 		numCalls := 1000
 		for i := 0; i < numCalls; i++ {
 			go func() {
-				cache.Get(context.Background(), key, fetchFunc)
+				_, _ = cache.Get(context.Background(), key, fetchFunc)
 			}()
 			go func() {
-				cache.Get(context.Background(), key+"2", fetchFunc)
+				_, _ = cache.Get(context.Background(), key+"2", fetchFunc)
 			}()
 		}
+		time.Sleep(time.Second)
 
 		// Close the cache.
 		cacheClosed := make(chan struct{})

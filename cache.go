@@ -2,19 +2,26 @@ package smartcache
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
+
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
+// FetchFunc fetches data to be cached.
 type FetchFunc[T any] func(ctx context.Context, key string) (*T, error)
 
+// ErrorTTLFunc defines if and for how long to cache errors returned by `FetchFunc`.
+// If it returns 0, error will not be cached.
 type ErrorTTLFunc func(err error) time.Duration
 
+// BackgroundErrorHandler is a handler for `FetchFunc` errors, if they happen during a background refresh.
 type BackgroundErrorHandler func(err error)
 
+// Cache stores the internal in-memory LRU cache and is responsible for coordinating the cache access.
 type Cache[T any] struct {
-	cache map[string]cacheItemCh[T]
-	mu    sync.Mutex
+	cache *lru.Cache[string, cacheItemCh[T]]
 
 	config config
 	// ctx is the parent context of background refreshes.
@@ -25,7 +32,7 @@ type Cache[T any] struct {
 	wg sync.WaitGroup
 }
 
-func New[T any](options ...Option) *Cache[T] {
+func New[T any](options ...Option) (*Cache[T], error) {
 	// Create an initial config with sane defaults.
 	cfg := config{
 		primaryTTL:             time.Minute,
@@ -33,23 +40,28 @@ func New[T any](options ...Option) *Cache[T] {
 		backgroundFetchTimeout: time.Minute,
 		backgroundErrorHandler: func(err error) {},                         // Empty function to avoid nil checks.
 		errorTTLFunc:           func(err error) time.Duration { return 0 }, // Don't cache errors.
+		cacheSize:              10000,
 	}
 
 	// Apply all user options.
 	for _, o := range options {
-		o(&cfg)
+		if err := o(&cfg); err != nil {
+			return nil, fmt.Errorf("invalid config: %w", err)
+		}
 	}
 
-	// TODO: validate config!
+	cache, err := lru.New[string, cacheItemCh[T]](int(cfg.cacheSize))
+	if err != nil {
+		return nil, fmt.Errorf("creating lru cache: %w", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-
 	return &Cache[T]{
-		cache:     make(map[string]cacheItemCh[T]),
+		cache:     cache,
 		config:    cfg,
 		ctx:       ctx,
 		ctxCancel: cancel,
-	}
+	}, nil
 }
 
 func (sc *Cache[T]) Close() {
@@ -57,6 +69,7 @@ func (sc *Cache[T]) Close() {
 	sc.wg.Wait()
 }
 
+// Get retrieves a value from the cache for a given key. If the value is not found or expired, the function fetches the data using the provided fetchFunc and updates the cache accordingly.
 func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T]) (*T, error) {
 	if err := sc.ctx.Err(); err != nil {
 		return nil, err
@@ -65,18 +78,13 @@ func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T])
 	sc.wg.Add(1)
 	defer sc.wg.Done()
 
-	sc.mu.Lock()
-	itemCh, found := sc.cache[key]
-	sc.mu.Unlock()
+	itemCh, found := sc.cache.Get(key)
 
 	// If no cache found, put an expired item to it.
 	// Then it will be handled the same way as if cache was there but expired.
 	if !found {
 		itemCh = make(cacheItemCh[T], 1)
-
-		sc.mu.Lock()
-		sc.cache[key] = itemCh
-		sc.mu.Unlock()
+		sc.cache.Add(key, itemCh)
 
 		itemCh <- newEmptyExpiredCacheItem[T]()
 	}
