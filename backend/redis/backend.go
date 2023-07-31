@@ -33,6 +33,10 @@ func NewBackend[T any](client *redis.Client) (*Backend[T], error) {
 func (b *Backend[T]) Get(ctx context.Context, key string) (*smartcache.CacheEntry[T], error) {
 	data, err := b.client.Get(ctx, key).Result()
 	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, nil
+		}
+
 		return nil, fmt.Errorf("fetching data from redis: %w", err)
 	}
 
