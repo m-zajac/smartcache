@@ -2,15 +2,33 @@ package smartcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
-
-	lru "github.com/hashicorp/golang-lru/v2"
 )
 
+// Backend can store and retrieve cache data by key.
+type Backend[T any] interface {
+	// Get returns cache data by key.
+	Get(ctx context.Context, key string) (*CacheEntry[T], error)
+	// Set stores cache data by key.
+	Set(ctx context.Context, key string, ttl time.Duration, data *CacheEntry[T]) error
+	// Closes the backend.
+	Close()
+}
+
 // FetchFunc fetches data to be cached.
-type FetchFunc[T any] func(ctx context.Context, key string) (*T, error)
+type FetchFunc[T any] func(ctx context.Context, key string) (*FetchResult[T], error)
+
+// FetchResult is a container for cached item.
+type FetchResult[T any] struct {
+	// Data contains the result to store in cache.
+	Data *T
+	// CreatedAt is a time when the data was fetched as fresh.
+	// Optional, defaults to the function call time.
+	CreatedAt time.Time
+}
 
 // ErrorTTLFunc defines if and for how long to cache errors returned by `FetchFunc`.
 // If it returns 0, error will not be cached.
@@ -19,11 +37,19 @@ type ErrorTTLFunc func(err error) time.Duration
 // BackgroundErrorHandler is a handler for `FetchFunc` errors, if they happen during a background refresh.
 type BackgroundErrorHandler func(err error)
 
+type request struct {
+	requests      uint
+	lock          chan struct{}
+	updatePending bool
+}
+
 // Cache stores the internal in-memory LRU cache and is responsible for coordinating the cache access.
 type Cache[T any] struct {
-	cache *lru.Cache[string, cacheItemCh[T]]
+	backend  Backend[T]
+	requests chan map[string]*request
 
 	config config
+
 	// ctx is the parent context of background refreshes.
 	// It will be closed when `Close` method is called.
 	ctx       context.Context
@@ -32,7 +58,12 @@ type Cache[T any] struct {
 	wg sync.WaitGroup
 }
 
-func New[T any](options ...Option) (*Cache[T], error) {
+// New creates a new cache.
+func New[T any](backend Backend[T], options ...Option) (*Cache[T], error) {
+	if backend == nil {
+		return nil, errors.New("backend is nil")
+	}
+
 	// Create an initial config with sane defaults.
 	cfg := config{
 		primaryTTL:             time.Minute,
@@ -40,7 +71,6 @@ func New[T any](options ...Option) (*Cache[T], error) {
 		backgroundFetchTimeout: time.Minute,
 		backgroundErrorHandler: func(err error) {},                         // Empty function to avoid nil checks.
 		errorTTLFunc:           func(err error) time.Duration { return 0 }, // Don't cache errors.
-		cacheSize:              10000,
 	}
 
 	// Apply all user options.
@@ -50,20 +80,20 @@ func New[T any](options ...Option) (*Cache[T], error) {
 		}
 	}
 
-	cache, err := lru.New[string, cacheItemCh[T]](int(cfg.cacheSize))
-	if err != nil {
-		return nil, fmt.Errorf("creating lru cache: %w", err)
-	}
+	requestsCh := make(chan map[string]*request, 1)
+	requestsCh <- make(map[string]*request)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Cache[T]{
-		cache:     cache,
+		backend:   backend,
+		requests:  requestsCh,
 		config:    cfg,
 		ctx:       ctx,
 		ctxCancel: cancel,
 	}, nil
 }
 
+// Close closes the cache.
 func (sc *Cache[T]) Close() {
 	sc.ctxCancel()
 	sc.wg.Wait()
@@ -78,46 +108,77 @@ func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T])
 	sc.wg.Add(1)
 	defer sc.wg.Done()
 
-	itemCh, found := sc.cache.Get(key)
+	// Obtain request with a lock, increase requests count for the key, obtain a lock for the key.
+	requests := <-sc.requests
+	req, found := requests[key]
+	if found {
+		req.requests++
+	} else {
+		req = &request{
+			requests: 1,
+			lock:     make(chan struct{}, 1),
+		}
+		req.lock <- struct{}{}
+		requests[key] = req
+	}
+	lockCh := req.lock
+	sc.requests <- requests
 
-	// If no cache found, put an expired item to it.
-	// Then it will be handled the same way as if cache was there but expired.
-	if !found {
-		itemCh = make(cacheItemCh[T], 1)
-		sc.cache.Add(key, itemCh)
+	// On finish: decrease requests count for key, remove the entry if count goes to 0, release the lock.
+	defer func() {
+		requests := <-sc.requests
+		requests[key].requests--
+		if requests[key].requests == 0 {
+			delete(requests, key)
+		}
+		sc.requests <- requests
 
-		itemCh <- newEmptyExpiredCacheItem[T]()
+		lockCh <- struct{}{}
+	}()
+
+	<-lockCh
+
+	entry, err := sc.backend.Get(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("cache backend failed for key '%s': %w", key, err)
 	}
 
-	item := <-itemCh
-
 	switch {
-	// Cached data is fresh.
-	case !item.isExpired(sc.config.primaryTTL):
-		defer func() { itemCh <- item }()
-		return item.data, item.err
-
-	// Cached data is stale.
-	case item.isExpired(sc.config.secondaryTTL):
+	// Cached data is stale or missing, fetchFunc has to be called immmediately.
+	case entry == nil || entry.IsExpired(sc.config.secondaryTTL):
 		fetchCtx, cancel := sc.newForegroundContext(ctx)
 		defer cancel()
 
-		item, err := sc.fetchToCacheItem(fetchCtx, key, fetchFunc)
+		item, err := sc.fetchToCacheEntry(fetchCtx, key, fetchFunc)
 		if err != nil {
-			itemCh <- item
 			return nil, err
 		}
 
-		itemCh <- item
-		return item.data, item.err
+		if err := sc.backend.Set(ctx, key, sc.config.secondaryTTL, item); err != nil {
+			return nil, fmt.Errorf("failed to update cache for key '%s': %w", key, err)
+		}
 
-	// Cached data can be returned, but needs a refresh.
+		return item.Data, item.Err
+
+	// Cached data is fresh.
+	case !entry.IsExpired(sc.config.primaryTTL):
+		return entry.Data, entry.Err
+
+	// Cached data can be returned, but needs a refresh in the background.
 	default:
-		data, err := item.data, item.err
+		requests := <-sc.requests
+		defer func() { sc.requests <- requests }()
 
-		// Refresh data in the background.
-		// Note that the cache key is stil blocked until this goroutine finishes.
-		// Next caller for the same key will have to wait on cache channel.
+		if requests[key].updatePending {
+			// There's already a background update pending,
+			// the data can be returned immediately.
+			return entry.Data, entry.Err
+		}
+
+		// Initiate data refresh in the background.
+		requests[key].updatePending = true
+		requests[key].requests++
+
 		sc.wg.Add(1)
 		go func() {
 			defer sc.wg.Done()
@@ -125,20 +186,29 @@ func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T])
 			bkgCtx, cancel := sc.newBackgroundContext()
 			defer cancel()
 
-			newItem, err := sc.fetchToCacheItem(bkgCtx, key, fetchFunc)
+			item, err := sc.fetchToCacheEntry(bkgCtx, key, fetchFunc)
 			if err != nil {
 				sc.config.backgroundErrorHandler(err)
-				itemCh <- item // Put the old item back to cache, it is still valid.
 			}
 
-			itemCh <- newItem
+			if err := sc.backend.Set(ctx, key, sc.config.secondaryTTL, item); err != nil {
+				sc.config.backgroundErrorHandler(fmt.Errorf("failed to update cache for key '%s': %w", key, err))
+			}
+
+			requests := <-sc.requests
+			requests[key].requests--
+			requests[key].updatePending = false
+			if requests[key].requests == 0 {
+				delete(requests, key)
+			}
+			sc.requests <- requests
 		}()
 
-		return data, err
+		return entry.Data, entry.Err
 	}
 }
 
-func (sc *Cache[T]) fetchToCacheItem(ctx context.Context, key string, fetchFunc FetchFunc[T]) (*cacheItem[T], error) {
+func (sc *Cache[T]) fetchToCacheEntry(ctx context.Context, key string, fetchFunc FetchFunc[T]) (*CacheEntry[T], error) {
 	data, err := fetchFunc(ctx, key)
 	if err != nil {
 		errTTL := sc.config.errorTTLFunc(err)
@@ -149,7 +219,7 @@ func (sc *Cache[T]) fetchToCacheItem(ctx context.Context, key string, fetchFunc 
 		return newErrCacheItem[T](err, errTTL), nil
 	}
 
-	return newOKCacheItem(data), nil
+	return newOKCacheItem(data.Data), nil
 }
 
 func (sc *Cache[T]) newBackgroundContext() (ctx context.Context, cancel func()) {

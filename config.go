@@ -11,32 +11,18 @@ type config struct {
 	backgroundFetchTimeout time.Duration
 	backgroundErrorHandler BackgroundErrorHandler
 	errorTTLFunc           ErrorTTLFunc
-	cacheSize              uint
 }
 
 // Options allows to configure cache settings.
 type Option func(*config) error
 
-// WithCacheSize sets the size of the internal LRU cache.
-func WithCacheSize(size uint) Option {
-	return func(c *config) error {
-		if size == 0 {
-			return errors.New("cache size has to be > 0")
-		}
-
-		c.cacheSize = size
-
-		return nil
-	}
-}
-
 // WithTTL sets the primary and secondary TTLs.
 func WithTTL(primaryTTL, secondaryTTL time.Duration) Option {
 	return func(c *config) error {
-		if c.primaryTTL == 0 {
+		if primaryTTL == 0 {
 			return errors.New("primaryTTL has to be > 0")
 		}
-		if c.secondaryTTL <= c.primaryTTL {
+		if secondaryTTL <= primaryTTL {
 			return errors.New("secondaryTTL has to be > primaryTTL")
 		}
 
@@ -62,7 +48,7 @@ func WithErrorTTLFunc(f ErrorTTLFunc) Option {
 // WithBackgroundFetchTimeout allows setting a timeout for the background fetch function.
 func WithBackgroundFetchTimeout(timeout time.Duration) Option {
 	return func(c *config) error {
-		if timeout == 0 {
+		if timeout <= 0 {
 			return errors.New("timeout has to be > 0")
 		}
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/m-zajac/smartcache"
+	"github.com/m-zajac/smartcache/backend/lru"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,14 +20,16 @@ func TestCache(t *testing.T) {
 	// This function will be used as a fetch function
 	// in Get calls.
 	var calls atomic.Int32
-	fetchFunc := func(ctx context.Context, key string) (*string, error) {
+	fetchFunc := func(ctx context.Context, key string) (*smartcache.FetchResult[string], error) {
 		calls.Add(1)
 
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("context error: %w", err)
 		}
 
-		return &data, nil
+		return &smartcache.FetchResult[string]{
+			Data: &data,
+		}, nil
 	}
 
 	// When Get function is called with a missing key,
@@ -34,7 +37,10 @@ func TestCache(t *testing.T) {
 	t.Run("missing key", func(t *testing.T) {
 		calls.Store(0)
 
-		cache, err := smartcache.New[string]()
+		backend, err := lru.NewBackend[string](100)
+		require.NoError(t, err)
+
+		cache, err := smartcache.New[string](backend)
 		require.NoError(t, err)
 
 		ctx := context.Background()
@@ -50,7 +56,10 @@ func TestCache(t *testing.T) {
 	t.Run("present key", func(t *testing.T) {
 		calls.Store(0)
 
-		cache, err := smartcache.New[string]()
+		backend, err := lru.NewBackend[string](100)
+		require.NoError(t, err)
+
+		cache, err := smartcache.New[string](backend)
 		require.NoError(t, err)
 
 		ctx := context.Background()
@@ -69,7 +78,10 @@ func TestCache(t *testing.T) {
 	// When Get function is called with a context that was already cancelled,
 	// it should return an error immediately.
 	t.Run("cancelled parent context", func(t *testing.T) {
-		cache, err := smartcache.New[string]()
+		backend, err := lru.NewBackend[string](100)
+		require.NoError(t, err)
+
+		cache, err := smartcache.New[string](backend)
 		require.NoError(t, err)
 
 		parentCtx, cancel := context.WithCancel(context.Background())
@@ -81,18 +93,23 @@ func TestCache(t *testing.T) {
 
 	// When a Cache object is closed, all goroutines should be cleaned up.
 	t.Run("close", func(t *testing.T) {
-		cache, err := smartcache.New[string]()
+		backend, err := lru.NewBackend[string](100)
+		require.NoError(t, err)
+
+		cache, err := smartcache.New[string](backend)
 		require.NoError(t, err)
 
 		ready := make(chan struct{})
 
 		calls.Store(0)
-		fetchFunc := func(ctx context.Context, key string) (*string, error) {
+		fetchFunc := func(ctx context.Context, key string) (*smartcache.FetchResult[string], error) {
 			calls.Add(1)
 
 			<-ready
 
-			return &data, nil
+			return &smartcache.FetchResult[string]{
+				Data: &data,
+			}, nil
 		}
 
 		// Trigger a lot of goroutines fetching data for 2 different keys.
