@@ -12,26 +12,33 @@ import (
 )
 
 // Backend for cache that stores data in redis.
-// The data is serialized to JSON and stored as a JSON string.
+//
+// The data is serialized to JSON and stored as a JSON string. Note that the T type data has to be properly JSON-serializable!
+//
+// The error stored in cache entries will be stored as a string. That means that it's type be lost,
+// and after retrieval it will be a plain new go error.
+//
 // The client will be closed when the parent cache is closed.
 type Backend[T any] struct {
-	client *redis.Client
+	client    *redis.Client
+	keyPrefix string
 }
 
 var _ smartcache.Backend[string] = &Backend[string]{}
 
-func NewBackend[T any](client *redis.Client) (*Backend[T], error) {
+func NewBackend[T any](client *redis.Client, keyPrefix string) (*Backend[T], error) {
 	if client == nil {
 		return nil, errors.New("redis client is nil")
 	}
 
 	return &Backend[T]{
-		client: client,
+		client:    client,
+		keyPrefix: keyPrefix,
 	}, nil
 }
 
 func (b *Backend[T]) Get(ctx context.Context, key string) (*smartcache.CacheEntry[T], error) {
-	data, err := b.client.Get(ctx, key).Result()
+	data, err := b.client.Get(ctx, b.keyPrefix+key).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return nil, nil
@@ -49,7 +56,7 @@ func (b *Backend[T]) Set(ctx context.Context, key string, ttl time.Duration, ent
 		return err
 	}
 
-	b.client.Set(ctx, key, string(data), ttl)
+	b.client.Set(ctx, b.keyPrefix+key, string(data), ttl)
 
 	return nil
 }
