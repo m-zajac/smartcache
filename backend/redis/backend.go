@@ -21,7 +21,7 @@ type Backend[T any] struct {
 var _ smartcache.Backend[string] = &Backend[string]{}
 
 func NewBackend[T any](client *redis.Client) (*Backend[T], error) {
-	if client != nil {
+	if client == nil {
 		return nil, errors.New("redis client is nil")
 	}
 
