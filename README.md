@@ -8,7 +8,7 @@ One of the unique features of SmartCache is its dual Time-To-Live (TTL) settings
 - `Primary TTL`: This is the lifespan of a cache entry when it's still hot. During this period, entries are directly served from the cache.
 - `Secondary TTL`: This is the maximum lifespan of a cache entry. Once the primary TTL expires, while the secondary TTL is still active, the entry is considered warm but not evicted. Instead, SmartCache triggers a background refresh to update the entry, while immediately returning the stale value. This ensures uninterrupted access to data, even during updates.
 
-Here's the cache diagram:
+Here's the cache state diagram:
 
 ```mermaid
 stateDiagram-v2
