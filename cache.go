@@ -8,6 +8,20 @@ import (
 	"time"
 )
 
+type ResultType int
+
+// Result types.
+const (
+	Miss ResultType = iota
+	WarmHit
+	HotHit
+)
+
+type Result[T any] struct {
+	Data *T
+	Type ResultType
+}
+
 // Backend can store and retrieve cache data by key.
 type Backend[T any] interface {
 	// Get returns cache data by key.
@@ -28,6 +42,8 @@ type FetchResult[T any] struct {
 	// CreatedAt is a time when the data was fetched as fresh.
 	// Optional, defaults to the function call time.
 	CreatedAt time.Time
+	// Type of the result.
+	Type ResultType
 }
 
 // ErrorTTLFunc defines if and for how long to cache errors returned by `FetchFunc`.
@@ -100,9 +116,14 @@ func (sc *Cache[T]) Close() {
 }
 
 // Get retrieves a value from the cache for a given key. If the value is not found or expired, the function fetches the data using the provided fetchFunc and updates the cache accordingly.
-func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T]) (*T, error) {
+func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T]) (Result[T], error) {
+	var result Result[T]
+
 	if err := sc.ctx.Err(); err != nil {
-		return nil, err
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
 
 	sc.wg.Add(1)
@@ -140,39 +161,49 @@ func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T])
 
 	entry, err := sc.backend.Get(ctx, key)
 	if err != nil {
-		return nil, fmt.Errorf("cache backend failed for key '%s': %w", key, err)
+		return result, fmt.Errorf("cache backend failed for key '%s': %w", key, err)
 	}
 
 	switch {
 	// Cached data is stale or missing, fetchFunc has to be called immmediately.
 	case entry == nil || entry.IsExpired(sc.config.secondaryTTL):
+		result.Type = Miss
+
 		fetchCtx, cancel := sc.newForegroundContext(ctx)
 		defer cancel()
 
 		item, err := sc.fetchToCacheEntry(fetchCtx, key, fetchFunc)
 		if err != nil {
-			return nil, err
+			return result, err
 		}
 
 		if err := sc.backend.Set(ctx, key, sc.config.secondaryTTL, item); err != nil {
-			return nil, fmt.Errorf("failed to update cache for key '%s': %w", key, err)
+			return result, fmt.Errorf("failed to update cache for key '%s': %w", key, err)
 		}
 
-		return item.Data, item.Err
+		result.Data = item.Data
+
+		return result, item.Err
 
 	// Cached data is fresh.
 	case !entry.IsExpired(sc.config.primaryTTL):
-		return entry.Data, entry.Err
+		result.Type = HotHit
+		result.Data = entry.Data
+
+		return result, entry.Err
 
 	// Cached data can be returned, but needs a refresh in the background.
 	default:
+		result.Type = WarmHit
+		result.Data = entry.Data
+
 		requests := <-sc.requests
 		defer func() { sc.requests <- requests }()
 
 		if requests[key].updatePending {
 			// There's already a background update pending,
 			// the data can be returned immediately.
-			return entry.Data, entry.Err
+			return result, entry.Err
 		}
 
 		// Initiate data refresh in the background.
@@ -204,7 +235,7 @@ func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T])
 			sc.requests <- requests
 		}()
 
-		return entry.Data, entry.Err
+		return result, entry.Err
 	}
 }
 

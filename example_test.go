@@ -61,23 +61,27 @@ func ExampleCache() {
 	ctx := context.Background()
 	userID := "1"
 
-	// Fetch the user profile using the cache.
-	profile, _ := cache.Get(ctx, userID, fetchAdapter)
+	// Fetch the user result using the cache.
+	result, _ := cache.Get(ctx, userID, fetchAdapter)
+	profile := result.Data
 
 	// Fetch the user profile using the cache again. This time it will be returned from internal memory cache.
-	profile, _ = cache.Get(ctx, userID, fetchAdapter)
+	result, _ = cache.Get(ctx, userID, fetchAdapter)
+	profile = result.Data
 
 	// After primaryTTL duration paseses...
 	time.Sleep(primaryTTL + time.Second)
 
 	// ...cache will again return data from internal memory cache, but after that the internal value will be updated in the background.
-	profile, _ = cache.Get(ctx, userID, fetchAdapter)
+	result, _ = cache.Get(ctx, userID, fetchAdapter)
+	profile = result.Data
 
 	// After secondaryTTL duration paseses...
 	time.Sleep(primaryTTL + time.Second)
 
 	// ...cache will fetch fresh data, store it in memory and return the value.
-	profile, _ = cache.Get(ctx, userID, fetchAdapter)
+	result, _ = cache.Get(ctx, userID, fetchAdapter)
+	profile = result.Data
 
 	fmt.Printf("User profile: ID=%d, Name=%s\n", profile.ID, profile.Name)
 	// Output: User profile: ID=1, Name=John Doe

@@ -14,14 +14,20 @@ import (
 )
 
 func TestCache(t *testing.T) {
+	t.Parallel()
+
 	key := "some-key"
 	data := "some data"
 
 	// This function will be used as a fetch function
 	// in Get calls.
-	var calls atomic.Int32
+	callTokens := make(chan struct{}, 1)
 	fetchFunc := func(ctx context.Context, key string) (*smartcache.FetchResult[string], error) {
-		calls.Add(1)
+		select {
+		case <-callTokens:
+		case <-time.After(time.Second):
+			panic("unexpected call to fetchFunc")
+		}
 
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("context error: %w", err)
@@ -35,8 +41,6 @@ func TestCache(t *testing.T) {
 	// When Get function is called with a missing key,
 	// it should fetch the data, and then return it.
 	t.Run("missing key", func(t *testing.T) {
-		calls.Store(0)
-
 		backend, err := lru.NewBackend[string](100)
 		require.NoError(t, err)
 
@@ -45,34 +49,66 @@ func TestCache(t *testing.T) {
 
 		ctx := context.Background()
 
-		actual, err := cache.Get(ctx, key, fetchFunc)
+		callTokens <- struct{}{}
+		result, err := cache.Get(ctx, key, fetchFunc)
 		assert.NoError(t, err)
-		assert.Equal(t, data, *actual)
-		assert.EqualValues(t, 1, calls.Load())
+		assert.Equal(t, data, *result.Data)
+		assert.Equal(t, smartcache.Miss, result.Type)
 	})
 
 	// When Get function is called with a present key,
 	// it should return the previously fetched data.
 	t.Run("present key", func(t *testing.T) {
-		calls.Store(0)
-
 		backend, err := lru.NewBackend[string](100)
 		require.NoError(t, err)
 
-		cache, err := smartcache.New[string](backend)
+		const primTTL = 500 * time.Millisecond
+		const secTTL = 2 * time.Second
+		cache, err := smartcache.New[string](
+			backend,
+			smartcache.WithTTL(primTTL, secTTL),
+		)
 		require.NoError(t, err)
 
 		ctx := context.Background()
 
-		actual1, err := cache.Get(ctx, key, fetchFunc)
+		// Miss.
+		callTokens <- struct{}{}
+		result1, err := cache.Get(ctx, key, fetchFunc)
 		assert.NoError(t, err)
-		assert.Equal(t, data, *actual1)
-		assert.EqualValues(t, 1, calls.Load())
+		assert.Equal(t, data, *result1.Data)
+		assert.Equal(t, smartcache.Miss, result1.Type)
 
-		actual2, err := cache.Get(ctx, key, fetchFunc)
+		// Hot hit, no call to fetchFunc.
+		result2, err := cache.Get(ctx, key, fetchFunc)
 		assert.NoError(t, err)
-		assert.Equal(t, *actual1, *actual2)
-		assert.EqualValues(t, 1, calls.Load())
+		assert.Equal(t, *result1.Data, *result2.Data)
+		assert.Equal(t, smartcache.HotHit, result2.Type)
+
+		// Warm hit after primary TTL expiration.
+		// No immediate fetchFunc call.
+		time.Sleep(primTTL + time.Millisecond)
+		result3, err := cache.Get(ctx, key, fetchFunc)
+		assert.NoError(t, err)
+		assert.Equal(t, *result1.Data, *result3.Data)
+		assert.Equal(t, smartcache.WarmHit, result3.Type)
+
+		// Now the fetchFunc will be called in bg to update the cache
+		callTokens <- struct{}{}
+
+		// Miss after secondary TTL expiration.
+		time.Sleep(secTTL + time.Millisecond)
+		callTokens <- struct{}{}
+		result4, err := cache.Get(ctx, key, fetchFunc)
+		assert.NoError(t, err)
+		assert.Equal(t, *result1.Data, *result4.Data)
+		assert.Equal(t, smartcache.Miss, result4.Type)
+
+		select {
+		case <-callTokens:
+			t.Fatal("fetchFunc called unexpected number of times")
+		default:
+		}
 	})
 
 	// When Get function is called with a context that was already cancelled,
@@ -101,7 +137,7 @@ func TestCache(t *testing.T) {
 
 		ready := make(chan struct{})
 
-		calls.Store(0)
+		var calls atomic.Int32
 		fetchFunc := func(ctx context.Context, key string) (*smartcache.FetchResult[string], error) {
 			calls.Add(1)
 
