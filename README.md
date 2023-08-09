@@ -26,27 +26,27 @@ sequenceDiagram
     opt First call, or after secondary TTL expired
         UserApp->>+SmartCache: Get data
         SmartCache->>+MemoryBackend: Check cached data
-        MemoryBackend->>-SmartCache: Data doesn't exist
+        MemoryBackend->>-SmartCache: Data doesn't exist or secondaryTTL expired
         SmartCache->>+FetchFunction: Fetch data
         FetchFunction->>FetchFunction: ...time consuming fetch...
         FetchFunction->>-SmartCache: Data ready
         SmartCache->>MemoryBackend: Store data
-        SmartCache->>-UserApp: Fresh data ready
+        SmartCache->>-UserApp: Fresh data
     end
 
     opt Call within primary TTL
         UserApp->>+SmartCache: Get data
         SmartCache->>+MemoryBackend: Check cached data
-        MemoryBackend->>-SmartCache: Data exists
-        SmartCache->>-UserApp: Data from cache is hot
+        MemoryBackend->>-SmartCache: Data exists, updated within primaryTTL 
+        SmartCache->>-UserApp: Hot data
     end
 
     opt Call after primary TTL bute before secondary TTL expired
         UserApp->>+SmartCache: Get data
         SmartCache->>+MemoryBackend: Check cached data
-        MemoryBackend->>-SmartCache: Data exists
+        MemoryBackend->>-SmartCache: Data exists, updated within secondaryTTL 
         par
-            SmartCache->>-UserApp: Data from cache is warm
+            SmartCache->>-UserApp: Warm data
         and Update data in the background
             SmartCache->>+FetchFunction: Fetch data
             FetchFunction->>FetchFunction: ...time consuming fetch...
