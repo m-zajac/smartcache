@@ -24,7 +24,7 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
     opt First call, or after secondary TTL expired
-        UserApp->>+SmartCache: Get data (first call)
+        UserApp->>+SmartCache: Get data
         SmartCache->>+MemoryBackend: Check cached data
         MemoryBackend->>-SmartCache: Data doesn't exist
         SmartCache->>+FetchFunction: Fetch data
@@ -35,14 +35,14 @@ sequenceDiagram
     end
 
     opt Call within primary TTL
-        UserApp->>+SmartCache: Get data (call within primary TTL)
+        UserApp->>+SmartCache: Get data
         SmartCache->>+MemoryBackend: Check cached data
         MemoryBackend->>-SmartCache: Data exists
         SmartCache->>-UserApp: Data from cache is hot
     end
 
     opt Call after primary TTL bute before secondary TTL expired
-        UserApp->>+SmartCache: Get data (call after primary TTL, before secondary TTL)
+        UserApp->>+SmartCache: Get data
         SmartCache->>+MemoryBackend: Check cached data
         MemoryBackend->>-SmartCache: Data exists
         par
