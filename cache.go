@@ -17,6 +17,19 @@ const (
 	HotHit
 )
 
+func (t ResultType) String() string {
+	switch t {
+	case Miss:
+		return "miss"
+	case WarmHit:
+		return "warmHit"
+	case HotHit:
+		return "hotHit"
+	default:
+		return ""
+	}
+}
+
 type Result[T any] struct {
 	Data *T
 	Type ResultType
@@ -42,8 +55,6 @@ type FetchResult[T any] struct {
 	// CreatedAt is a time when the data was fetched as fresh.
 	// Optional, defaults to the function call time.
 	CreatedAt time.Time
-	// Type of the result.
-	Type ResultType
 }
 
 // ErrorTTLFunc defines if and for how long to cache errors returned by `FetchFunc`.
