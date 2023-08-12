@@ -1,14 +1,15 @@
 # Smart Cache ![Build](https://github.com/m-zajac/smartcache/workflows/Build/badge.svg) [![Go Report Card](https://goreportcard.com/badge/github.com/m-zajac/smartcache)](https://goreportcard.com/report/github.com/m-zajac/smartcache) [![GoDoc](https://godoc.org/github.com/m-zajac/smartcache?status.svg)](http://godoc.org/github.com/m-zajac/smartcache)
 
-Smartcache package provides a caching solution with customizable expiration policies (hot and warm data).
-It is designed to optimize data retrieval by caching the results of expensive operations, such as database queries or API calls, and serving them quickly when requested.
 
-One of the unique features of SmartCache is its dual Time-To-Live (TTL) settings:
+Smart Cache introduces a caching mechanism that employs two distinct TTL (Time-To-Live) periods, designed to optimize data retrieval speed while managing data freshness.
 
-- `Primary TTL`: This is the lifespan of a cache entry when it's still hot. During this period, entries are directly served from the cache.
-- `Secondary TTL`: This is the maximum lifespan of a cache entry. Once the primary TTL expires, while the secondary TTL is still active, the entry is considered warm but not evicted. Instead, SmartCache triggers a background refresh to update the entry, while immediately returning the stale value. This ensures uninterrupted access to data, even during updates.
+Traditional caching often faces a dilemma: prioritize speed by serving cached data or ensure freshness by frequently fetching new data. This balance can significantly influence metrics like p95 or p99 processing times, especially when dealing with resource-intensive operations.
 
-Here's the cache state diagram:
+With Smart Cache, data within its primary TTL is returned immediately, ensuring quick access. When data surpasses the primary TTL but is still within the secondary TTL, it's served instantly, but a background update is initiated. This background update mechanism aims to improve latency metrics by reducing the immediate load of full data refreshes. However, there's a trade-off to be aware of: data served between the primary and secondary TTL might be slightly older, and the freshest data is only guaranteed on a subsequent fetch after the background update.
+
+In essence, Smart Cache's dual-TTL approach offers a balanced solution for applications that need to maintain high-performance metrics while occasionally serving slightly older data.
+
+To better understand the transitions between data states, check the following diagram:
 
 ```mermaid
 stateDiagram-v2
@@ -18,119 +19,42 @@ stateDiagram-v2
     Warm --> Hot: Update
 ```
 
+## Example usage
+
+[Check the example on go playground](https://go.dev/play/p/xjl7MwQ8Sjq)
+
 ## How it works
 
 
 ```mermaid
 sequenceDiagram
-    opt First call, or after secondary TTL expired
-        UserApp->>+SmartCache: Get data
-        SmartCache->>+MemoryBackend: Check cached data
-        MemoryBackend->>-SmartCache: Data doesn't exist or secondaryTTL expired
-        SmartCache->>+FetchFunction: Fetch data
-        FetchFunction->>FetchFunction: ...time consuming fetch...
-        FetchFunction->>-SmartCache: Data ready
-        SmartCache->>MemoryBackend: Store data
-        SmartCache->>-UserApp: Fresh data
+    opt First call or after secondary TTL expired
+        UserApp->>+SmartCache: Request data
+        SmartCache->>+MemoryBackend: Check cache
+        MemoryBackend->>-SmartCache: Data absent or secondaryTTL expired
+        SmartCache->>+FetchFunction: Fetch fresh data
+        FetchFunction->>FetchFunction: ...time-consuming operation...
+        FetchFunction->>-SmartCache: Return fresh data
+        SmartCache->>MemoryBackend: Cache data
+        SmartCache->>-UserApp: Return fresh data
     end
 
     opt Call within primary TTL
-        UserApp->>+SmartCache: Get data
-        SmartCache->>+MemoryBackend: Check cached data
-        MemoryBackend->>-SmartCache: Data exists, updated within primaryTTL 
-        SmartCache->>-UserApp: Hot data
+        UserApp->>+SmartCache: Request data
+        SmartCache->>+MemoryBackend: Check cache
+        MemoryBackend->>-SmartCache: Data available
+        SmartCache->>-UserApp: Return hot data
     end
 
-    opt Call after primary TTL bute before secondary TTL expired
-        UserApp->>+SmartCache: Get data
-        SmartCache->>+MemoryBackend: Check cached data
-        MemoryBackend->>-SmartCache: Data exists, updated within secondaryTTL 
-        par
-            SmartCache->>-UserApp: Warm data
-        and Update data in the background
-            SmartCache->>+FetchFunction: Fetch data
-            FetchFunction->>FetchFunction: ...time consuming fetch...
-            FetchFunction->>-SmartCache: Data ready
-            SmartCache->>MemoryBackend: Store data
-        end
+    opt Call after primary TTL but before secondary TTL expired
+        UserApp->>+SmartCache: Request data
+        SmartCache->>+MemoryBackend: Check cache
+        MemoryBackend->>-SmartCache: Data available
+        SmartCache->>-UserApp: Return warm data
+        SmartCache->>+FetchFunction: Background fetch for data update
+        FetchFunction->>FetchFunction: ...time-consuming operation...
+        FetchFunction->>-SmartCache: Return updated data
+        SmartCache->>MemoryBackend: Refresh cache
     end
 ```
 
-## Example usage
-
-```go
-	type UserProfile struct {
-		ID   int
-		Name string
-	}
-
-	// An example function that provides data that we want to cache.
-	fetchUserProfile := func(ctx context.Context, userID string) (*UserProfile, error) {
-		// Simulate a slow database query.
-		time.Sleep(500 * time.Millisecond)
-
-		// Fetch the user profile from the database.
-		profile := &UserProfile{ID: 1, Name: "John Doe"}
-
-		return profile, nil
-	}
-
-	// This will be a fetch wrapper to use for the cache.
-	// It adapts our `fetchUserProfile` function to return `smartcache.FetchResult`.
-	fetchAdapter := func(ctx context.Context, key string) (*smartcache.FetchResult[UserProfile], error) {
-		profile, err := fetchUserProfile(ctx, key)
-		if err != nil {
-			return nil, err
-		}
-
-		return &smartcache.FetchResult[UserProfile]{
-			Data: profile,
-		}, nil
-	}
-
-	// For this example lets use small values.
-	primaryTTL, secondaryTTL := time.Second, 3*time.Second
-
-	backend, err := lru.NewBackend[UserProfile](100)
-	if err != nil {
-		fmt.Println("Creating cache backend:", err)
-		return
-	}
-
-	cache, err := smartcache.New[UserProfile](
-		backend,
-		smartcache.WithTTL(primaryTTL, secondaryTTL),
-	)
-	if err != nil {
-		fmt.Println("Creating cache:", err)
-		return
-	}
-
-	ctx := context.Background()
-	userID := "1"
-
-	// Fetch the user result using the cache.
-	result, _ := cache.Get(ctx, userID, fetchAdapter)
-	profile := result.Data
-
-	// Fetch the user profile using the cache again. This time it will be returned from internal memory cache.
-	result, _ = cache.Get(ctx, userID, fetchAdapter)
-	profile = result.Data
-
-	// After primaryTTL duration paseses...
-	time.Sleep(primaryTTL + time.Second)
-
-	// ...cache will again return data from internal memory cache, but after that the internal value will be updated in the background.
-	result, _ = cache.Get(ctx, userID, fetchAdapter)
-	profile = result.Data
-
-	// After secondaryTTL duration paseses...
-	time.Sleep(primaryTTL + time.Second)
-
-	// ...cache will fetch fresh data, store it in memory and return the value.
-	result, _ = cache.Get(ctx, userID, fetchAdapter)
-	profile = result.Data
-
-	fmt.Printf("User profile: ID=%d, Name=%s\n", profile.ID, profile.Name)
-	// Output: User profile: ID=1, Name=John Doe
-```
