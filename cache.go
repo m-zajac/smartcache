@@ -33,13 +33,16 @@ func (t ResultType) String() string {
 type Result[T any] struct {
 	Data *T
 	Type ResultType
+	Age  time.Duration
 }
 
 // Backend can store and retrieve cache data by key.
 type Backend[T any] interface {
 	// Get returns cache data by key.
+	// It should return nil if the key is not found.
 	Get(ctx context.Context, key string) (*CacheEntry[T], error)
 	// Set stores cache data by key.
+	// It should obey the ttl value without inspecting the entry.
 	Set(ctx context.Context, key string, ttl time.Duration, data *CacheEntry[T]) error
 	// Closes the backend.
 	Close()
@@ -179,6 +182,7 @@ func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T])
 	// Cached data is stale or missing, fetchFunc has to be called immmediately.
 	case entry == nil || entry.IsExpired(sc.config.secondaryTTL):
 		result.Type = Miss
+		result.Age = 0
 
 		fetchCtx, cancel := sc.newForegroundContext(ctx)
 		defer cancel()
@@ -200,6 +204,7 @@ func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T])
 	case !entry.IsExpired(sc.config.primaryTTL):
 		result.Type = HotHit
 		result.Data = entry.Data
+		result.Age = time.Since(entry.Created)
 
 		return result, entry.Err
 
@@ -207,6 +212,7 @@ func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T])
 	default:
 		result.Type = WarmHit
 		result.Data = entry.Data
+		result.Age = time.Since(entry.Created)
 
 		requests := <-sc.requests
 		defer func() { sc.requests <- requests }()
@@ -255,13 +261,18 @@ func (sc *Cache[T]) fetchToCacheEntry(ctx context.Context, key string, fetchFunc
 	if err != nil {
 		errTTL := sc.config.errorTTLFunc(err)
 		if errTTL == 0 {
-			return newEmptyExpiredCacheItem[T](), err
+			return newEmptyExpiredCacheEntry[T](), err
 		}
 
-		return newErrCacheItem[T](err, errTTL), nil
+		return newErrCacheEntry[T](err, errTTL), nil
 	}
 
-	return newOKCacheItem(data.Data), nil
+	created := data.CreatedAt
+	if created.IsZero() {
+		created = time.Now()
+	}
+
+	return newOKCacheEntry(data.Data, created), nil
 }
 
 func (sc *Cache[T]) newBackgroundContext() (ctx context.Context, cancel func()) {

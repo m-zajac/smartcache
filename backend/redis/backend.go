@@ -56,9 +56,9 @@ func (b *Backend[T]) Set(ctx context.Context, key string, ttl time.Duration, ent
 		return err
 	}
 
-	b.client.Set(ctx, b.keyPrefix+key, string(data), ttl)
+	cmd := b.client.Set(ctx, b.keyPrefix+key, string(data), ttl)
 
-	return nil
+	return cmd.Err()
 }
 
 func (b *Backend[T]) Close() {
