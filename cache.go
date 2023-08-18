@@ -239,7 +239,7 @@ func (sc *Cache[T]) Get(ctx context.Context, key string, fetchFunc FetchFunc[T])
 				sc.config.backgroundErrorHandler(err)
 			}
 
-			if err := sc.backend.Set(ctx, key, sc.config.secondaryTTL, item); err != nil {
+			if err := sc.backend.Set(bkgCtx, key, sc.config.secondaryTTL, item); err != nil {
 				sc.config.backgroundErrorHandler(fmt.Errorf("failed to update cache for key '%s': %w", key, err))
 			}
 
