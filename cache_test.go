@@ -2,6 +2,7 @@ package smartcache_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -178,4 +179,74 @@ func TestCache(t *testing.T) {
 			assert.EqualValues(t, 2, calls.Load())
 		}
 	})
+}
+
+func TestCache_FailureOnBackgroundUpdate(t *testing.T) {
+	t.Parallel()
+
+	key := "some-key"
+	data := "some data"
+
+	// This function will be used as a fetch function
+	// in Get calls.
+	callTokens := make(chan struct{}, 1)
+	shouldFail := false
+	fetchFunc := func(ctx context.Context, key string) (*smartcache.FetchResult[string], error) {
+		select {
+		case <-callTokens:
+		case <-time.After(time.Second):
+			panic("unexpected call to fetchFunc")
+		}
+
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("context error: %w", err)
+		}
+
+		if shouldFail {
+			return nil, errors.New("failed")
+		}
+
+		return &smartcache.FetchResult[string]{
+			Data: &data,
+		}, nil
+	}
+
+	backend, err := lru.NewBackend[string](100)
+	require.NoError(t, err)
+
+	const primTTL = 500 * time.Millisecond
+	const secTTL = 2 * time.Second
+	cache, err := smartcache.New[string](
+		backend,
+		smartcache.WithTTL(primTTL, secTTL),
+	)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// First call, cache updated.
+	shouldFail = false
+	callTokens <- struct{}{}
+	result1, err := cache.Get(ctx, key, fetchFunc)
+	require.NoError(t, err)
+	assert.Equal(t, data, *result1.Data)
+	assert.Equal(t, smartcache.Miss, result1.Type)
+
+	// Wait till primary TTL expires.
+	time.Sleep(primTTL + time.Millisecond)
+
+	// Now the fetch func will fail, the stale data should be returned with no error.
+	shouldFail = true
+	callTokens <- struct{}{}
+	result2, err := cache.Get(ctx, key, fetchFunc)
+	require.NoError(t, err)
+	assert.Equal(t, *result1.Data, *result2.Data)
+	assert.Equal(t, smartcache.WarmHit, result2.Type)
+
+	// Subsequent calls should also be ok.
+	callTokens <- struct{}{}
+	result3, err := cache.Get(ctx, key, fetchFunc)
+	require.NoError(t, err)
+	assert.Equal(t, *result1.Data, *result3.Data)
+	assert.Equal(t, smartcache.WarmHit, result3.Type)
 }
